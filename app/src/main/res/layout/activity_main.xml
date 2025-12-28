@@ -22,7 +22,7 @@
             android:id="@+id/inputHost"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="sg.bismillahi.biz.id"/>
+            android:text="rw2.ngangguro-lab.jp.eu.org"/>
     </com.google.android.material.textfield.TextInputLayout>
 
     <com.google.android.material.textfield.TextInputLayout
@@ -34,7 +34,8 @@
             android:id="@+id/inputPass"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="tes"/>
+            android:text="asd63"/>
+    </com.google.android.material.textfield.TextInputEditText>
     </com.google.android.material.textfield.TextInputLayout>
 
     <Button
