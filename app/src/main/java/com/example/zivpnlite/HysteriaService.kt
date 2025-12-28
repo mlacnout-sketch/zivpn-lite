@@ -106,8 +106,11 @@ class HysteriaService : VpnService() {
                 "--config", finalJsonArg
             )
             
+            val logFile = File(filesDir, "process_log.txt")
             val process = ProcessBuilder(*cmd)
                 .directory(filesDir)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
                 .start()
             processList.add(process)
         }
@@ -120,8 +123,11 @@ class HysteriaService : VpnService() {
         val cmd = mutableListOf(libload, "-lport", LOAD_BALANCER_PORT.toString(), "-tunnel")
         cmd.addAll(tunnelArgs)
 
+        val logFile = File(filesDir, "process_log.txt")
         val process = ProcessBuilder(cmd)
             .directory(filesDir)
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
             .start()
         processList.add(process)
     }
@@ -160,8 +166,11 @@ class HysteriaService : VpnService() {
             "--tunfd", tunFd.toString()
         )
 
+        val logFile = File(filesDir, "process_log.txt")
         val process = ProcessBuilder(*cmd)
             .directory(filesDir)
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
             .start()
         processList.add(process)
     }
