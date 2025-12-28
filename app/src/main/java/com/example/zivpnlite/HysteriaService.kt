@@ -11,7 +11,11 @@ class HysteriaService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var processList = mutableListOf<Process>()
-    private val binaries = listOf("libuz.so", "libload.so", "libtun2socks.so", "libpdnsd.so", "pdnsd.conf")
+    
+    // Path ke folder library native (/data/app/.../lib/arm64)
+    private val nativeLibDir: String by lazy {
+        applicationInfo.nativeLibraryDir
+    }
 
     private val PORT_RANGES = listOf(
         "6000-9500",
@@ -23,10 +27,8 @@ class HysteriaService : VpnService() {
     private val LOCAL_PORTS = listOf(1080, 1081, 1082, 1083)
     private val LOAD_BALANCER_PORT = 7777
     
-    // Konfigurasi IP VPN (Meniru ZIVPN)
     private val VPN_ADDRESS = "169.254.1.1"
     private val TUN2SOCKS_ADDRESS = "169.254.1.2"
-    private val DNS_PORT = 8091
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
@@ -40,10 +42,10 @@ class HysteriaService : VpnService() {
 
         Thread {
             try {
-                prepareBinaries()
+                prepareConfigs()
                 startHysteriaCore(host, pass)
                 startLoadBalancer()
-                startDnsServer() // NEW: Start DNS
+                startDnsServer()
                 startTun2Socks()
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -54,32 +56,25 @@ class HysteriaService : VpnService() {
         return START_STICKY
     }
 
-    private fun prepareBinaries() {
-        val binDir = File(filesDir, "bin")
-        if (!binDir.exists()) binDir.mkdirs()
-
-        binaries.forEach { fileName ->
-            val file = File(binDir, fileName)
-            assets.open(fileName).use { input ->
-                FileOutputStream(file).use { output ->
+    private fun prepareConfigs() {
+        // Kita hanya perlu menyiapkan pdnsd.conf karena binary sudah diurus sistem
+        val confFile = File(filesDir, "pdnsd.conf")
+        if (!confFile.exists()) {
+            assets.open("pdnsd.conf").use { input ->
+                FileOutputStream(confFile).use { output ->
                     input.copyTo(output)
                 }
             }
-            if (fileName.endsWith(".so")) {
-                file.setExecutable(true)
-            }
+            
+            // Fix path cache_dir
+            val content = confFile.readText()
+            val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", filesDir.absolutePath)
+            confFile.writeText(newContent)
         }
-        
-        // Fix path cache_dir di pdnsd.conf agar sesuai lokasi HP user
-        val confFile = File(binDir, "pdnsd.conf")
-        val content = confFile.readText()
-        val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", filesDir.absolutePath)
-        confFile.writeText(newContent)
     }
 
     private fun startHysteriaCore(host: String, pass: String) {
-        val binDir = File(filesDir, "bin")
-        val libuz = File(binDir, "libuz.so").absolutePath
+        val libuz = File(nativeLibDir, "libuz.so").absolutePath
 
         for (i in PORT_RANGES.indices) {
             val range = PORT_RANGES[i]
@@ -116,8 +111,7 @@ class HysteriaService : VpnService() {
     }
 
     private fun startLoadBalancer() {
-        val binDir = File(filesDir, "bin")
-        val libload = File(binDir, "libload.so").absolutePath
+        val libload = File(nativeLibDir, "libload.so").absolutePath
 
         val tunnelArgs = LOCAL_PORTS.map { "127.0.0.1:$it" }
         val cmd = mutableListOf(libload, "-lport", LOAD_BALANCER_PORT.toString(), "-tunnel")
@@ -130,11 +124,9 @@ class HysteriaService : VpnService() {
     }
 
     private fun startDnsServer() {
-        val binDir = File(filesDir, "bin")
-        val libpdnsd = File(binDir, "libpdnsd.so").absolutePath
-        val confFile = File(binDir, "pdnsd.conf").absolutePath
+        val libpdnsd = File(nativeLibDir, "libpdnsd.so").absolutePath
+        val confFile = File(filesDir, "pdnsd.conf").absolutePath
 
-        // Command: ./libpdnsd.so -v9 -c pdnsd.conf
         val cmd = arrayOf(libpdnsd, "-v9", "-c", confFile)
         
         val process = ProcessBuilder(*cmd)
@@ -148,16 +140,14 @@ class HysteriaService : VpnService() {
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
         builder.addRoute("0.0.0.0", 0)
-        builder.addDnsServer(VPN_ADDRESS) // Set DNS ke diri sendiri (PDNSD)
+        builder.addDnsServer(VPN_ADDRESS)
         builder.setMtu(1500)
         
         vpnInterface = builder.establish() ?: throw IOException("Failed to establish VPN")
         val tunFd = vpnInterface!!.fd
 
-        val binDir = File(filesDir, "bin")
-        val libtun = File(binDir, "libtun2socks.so").absolutePath
+        val libtun = File(nativeLibDir, "libtun2socks.so").absolutePath
 
-        // Command update: IP 169.254.1.2 dan DNS handling
         val cmd = arrayOf(
             libtun,
             "--netif-ipaddr", TUN2SOCKS_ADDRESS,
