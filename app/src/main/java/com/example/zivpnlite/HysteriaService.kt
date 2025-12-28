@@ -94,10 +94,16 @@ class HysteriaService : VpnService() {
             }
             """.trimIndent()
 
+            val configFile = File(filesDir, "config_$i.json")
+            configFile.writeText(configContent)
+
+            // BACA KEMBALI SEBAGAI STRING (Paling Aman)
+            val finalJsonArg = configFile.readText()
+
             val cmd = arrayOf(
                 libuz,
                 "-s", OBFS_KEY,
-                "--config", configContent
+                "--config", finalJsonArg
             )
             
             val process = ProcessBuilder(*cmd)
