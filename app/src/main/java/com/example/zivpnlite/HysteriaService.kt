@@ -6,6 +6,7 @@ import android.os.ParcelFileDescriptor
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.net.InetAddress
 
 class HysteriaService : VpnService() {
 
@@ -42,11 +43,12 @@ class HysteriaService : VpnService() {
 
         Thread {
             try {
+                val serverIP = InetAddress.getByName(host).hostAddress
                 prepareConfigs()
                 startHysteriaCore(host, pass)
                 startLoadBalancer()
                 startDnsServer()
-                startTun2Socks()
+                startTun2Socks(serverIP)
             } catch (e: Exception) {
                 e.printStackTrace()
                 stopVpn()
@@ -146,11 +148,22 @@ class HysteriaService : VpnService() {
         processList.add(process)
     }
 
-    private fun startTun2Socks() {
+    private fun startTun2Socks(serverIP: String) {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
-        builder.addRoute("0.0.0.0", 0)
+
+        // Routes: 0.0.0.0/0, 169.254.1.2/32
+        // Routes Excluded: 10.0.0.0/8, serverIP/32
+        val routes = calculateRoutes(serverIP)
+        for (route in routes) {
+            builder.addRoute(route.toRouteString(), route.prefix)
+        }
+
+        try {
+            builder.addRoute("169.254.1.2", 32)
+        } catch (_: Exception) {}
+
         builder.addDnsServer(VPN_ADDRESS)
         builder.setMtu(1500)
         
@@ -191,5 +204,64 @@ class HysteriaService : VpnService() {
     override fun onDestroy() {
         stopVpn()
         super.onDestroy()
+    }
+
+    // IP Calculation Logic
+    inner class Cidr(val ip: Long, val prefix: Int) {
+        fun toRouteString(): String {
+            return longToIp(ip)
+        }
+    }
+
+    private fun calculateRoutes(serverIP: String): List<Cidr> {
+        val base = Cidr(0, 0) // 0.0.0.0/0
+        var routes = listOf(base)
+
+        // Exclude 10.0.0.0/8
+        val exclude1 = Cidr(ipToLong("10.0.0.0"), 8)
+        routes = routes.flatMap { subtract(it, exclude1) }
+
+        // Exclude serverIP/32
+        val exclude2 = Cidr(ipToLong(serverIP), 32)
+        routes = routes.flatMap { subtract(it, exclude2) }
+
+        return routes
+    }
+
+    private fun subtract(base: Cidr, exclude: Cidr): List<Cidr> {
+        val baseStart = base.ip
+        val baseEnd = baseStart + (1L shl (32 - base.prefix)) - 1
+        val excludeStart = exclude.ip
+        val excludeEnd = excludeStart + (1L shl (32 - exclude.prefix)) - 1
+
+        if (baseStart > excludeEnd || baseEnd < excludeStart) {
+            // Disjoint
+            return listOf(base)
+        }
+
+        if (baseStart >= excludeStart && baseEnd <= excludeEnd) {
+            // Base fully contained in exclude
+            return emptyList()
+        }
+
+        // Split base
+        val newPrefix = base.prefix + 1
+        val leftIp = base.ip
+        val rightIp = base.ip + (1L shl (32 - newPrefix))
+
+        return subtract(Cidr(leftIp, newPrefix), exclude) + subtract(Cidr(rightIp, newPrefix), exclude)
+    }
+
+    private fun ipToLong(ip: String): Long {
+        val octets = ip.split(".")
+        var result = 0L
+        for (octet in octets) {
+            result = (result shl 8) + octet.toLong()
+        }
+        return result
+    }
+
+    private fun longToIp(ip: Long): String {
+        return "${(ip shr 24) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 8) and 0xFF}.${ip and 0xFF}"
     }
 }
