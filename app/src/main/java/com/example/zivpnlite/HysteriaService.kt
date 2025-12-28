@@ -59,6 +59,25 @@ class HysteriaService : VpnService() {
         filesToDelete.forEach { File(filesDir, it).delete() }
     }
 
+                prepareConfigs()
+                startHysteriaCore(resolvedIP, pass)
+                // startLoadBalancer() // BYPASS LOAD BALANCER (V17)
+                startDnsServer()
+                startTun2Socks(resolvedIP)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                stopVpn()
+            }
+        }.start()
+
+        return START_STICKY
+    }
+
+    private fun cleanUpFiles() {
+        val filesToDelete = listOf("tun.sock", "process_log.txt", "pdnsd_cache/pdnsd.cache")
+        filesToDelete.forEach { File(filesDir, it).delete() }
+    }
+
     private fun prepareConfigs() {
         val cacheDir = File(filesDir, "pdnsd_cache")
         if (!cacheDir.exists()) cacheDir.mkdirs()
@@ -121,21 +140,18 @@ class HysteriaService : VpnService() {
         val sockFile = File(filesDir, "tun.sock")
         if (sockFile.exists()) sockFile.delete()
 
-        // UDPGW dimatikan (karena libload TCP only).
-        // DNSGW diaktifkan ke localhost:8091 (PDNSD).
-        // Kenapa localhost? Karena PDNSD bind ke 0.0.0.0 atau 127.0.0.1 biasanya.
-        // Di config asli: server_ip = 169.254.1.1.
-        // Mari kita ikuti config asli PDNSD.
+        // DIRECT MODE (V17): Point to Hysteria Port (1080)
         
         val cmd = arrayOf(
             libtun,
             "--netif-ipaddr", TUN2SOCKS_ADDRESS,
             "--netif-netmask", "255.255.255.0",
-            "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
+            "--socks-server-addr", "127.0.0.1:1080", // DIRECT
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
             "--sock", sockFile.absolutePath,
-            "--dnsgw", "$VPN_ADDRESS:8091" // Sesuai config pdnsd asli
+            "--dnsgw", "$VPN_ADDRESS:8091",
+            "--udpgw-remote-server-addr", "127.0.0.1:1080" // DIRECT UDPGW
         )
 
         val logFile = File(filesDir, "process_log.txt")
