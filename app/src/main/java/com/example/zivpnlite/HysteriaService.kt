@@ -98,6 +98,7 @@ class HysteriaService : VpnService() {
             "--netif-ipaddr", TUN2SOCKS_ADDRESS,
             "--netif-netmask", "255.255.255.0",
             "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
+            "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
             "--sock", sockFile.absolutePath
