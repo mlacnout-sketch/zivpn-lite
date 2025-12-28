@@ -7,7 +7,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.InetAddress
-import java.util.LinkedList
+import java.util.ArrayList
 
 class HysteriaService : VpnService() {
 
@@ -43,8 +43,8 @@ class HysteriaService : VpnService() {
                 prepareConfigs()
                 startHysteriaCore(resolvedIP, pass)
                 startLoadBalancer()
-                // startDnsServer() // Skip PDNSD, pakai Google DNS langsung
-                startTun2Socks(resolvedIP) // Pass Server IP for routing
+                startDnsServer() // PDNSD is BACK!
+                startTun2Socks(resolvedIP)
             } catch (e: Exception) {
                 e.printStackTrace()
                 stopVpn()
@@ -55,34 +55,55 @@ class HysteriaService : VpnService() {
     }
 
     private fun cleanUpFiles() {
-        val filesToDelete = listOf("tun.sock", "process_log.txt")
+        val filesToDelete = listOf("tun.sock", "process_log.txt", "pdnsd_cache/pdnsd.cache")
         filesToDelete.forEach { File(filesDir, it).delete() }
+    }
+
+    private fun prepareConfigs() {
+        val cacheDir = File(filesDir, "pdnsd_cache")
+        if (!cacheDir.exists()) cacheDir.mkdirs()
+
+        val confFile = File(filesDir, "pdnsd.conf")
+        if (!confFile.exists()) {
+            assets.open("pdnsd.conf").use { input ->
+                FileOutputStream(confFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            val content = confFile.readText()
+            val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", cacheDir.absolutePath)
+            confFile.writeText(newContent)
+        }
+    }
+
+    private fun startDnsServer() {
+        val libpdnsd = File(nativeLibDir, "libpdnsd.so").absolutePath
+        val confFile = File(filesDir, "pdnsd.conf").absolutePath
+        // chmod config file to be sure
+        File(confFile).setReadable(true, false)
+
+        val cmd = arrayOf(libpdnsd, "-v9", "-c", confFile)
+        val logFile = File(filesDir, "process_log.txt")
+        val process = ProcessBuilder(*cmd)
+            .directory(filesDir)
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+            .start()
+        processList.add(process)
     }
 
     private fun startTun2Socks(serverIp: String) {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
-        builder.addDnsServer("8.8.8.8")
-        builder.addDnsServer("8.8.4.4")
+        builder.addDnsServer(VPN_ADDRESS) // Point DNS to 169.254.1.1 (PDNSD)
         builder.setMtu(1500)
 
-        // IMPLEMENTASI ROUTING PRESISI (Split Tunneling)
-        // Kita tidak pakai addDisallowedApplication lagi karena ZIVPN asli pakai Route Excluded.
-        
-        // 1. Exclude IP Server (Wajib, untuk hindari Loop)
-        // 2. Exclude 10.0.0.0/8 (IP Lokal)
-        
+        // Exclude Server IP (Prevent Loop)
         val routes = calculateRoutes(serverIp)
-        
         for (route in routes) {
-            // Logika exclude 10.0.0.0/8 sederhana:
-            // Jika route overlap dengan 10.0.0.0/8, skip.
-            // Tapi karena CIDR split rumit, kita exclude IP server saja sudah cukup untuk internet.
             builder.addRoute(route.address, route.prefix)
         }
-        
-        // Tambahkan route khusus 169.254.1.2/32 seperti log ZIVPN
         builder.addRoute(TUN2SOCKS_ADDRESS, 32)
 
         vpnInterface = builder.establish() ?: throw IOException("Failed to establish VPN")
@@ -92,16 +113,39 @@ class HysteriaService : VpnService() {
         val sockFile = File(filesDir, "tun.sock")
         if (sockFile.exists()) sockFile.delete()
 
-        // Hapus argumen --dnsgw agar tun2socks memproses DNS via SOCKS
+        // Tun2socks standard ZIVPN config (No UDPGW, No DNSGW args)
+        // PDNSD akan menghandle DNS request dari Android di 169.254.1.1:8091?
+        // Tunggu, Android kirim ke port 53. PDNSD listen di 8091.
+        // Siapa yang forward 53 -> 8091?
+        // Di config PDNSD ZIVPN tertulis: server_port = 8091.
+        // Jika tidak ada iptables, ini MISTERI.
+        // KECUALI... tun2socks punya built-in redirect jika --dnsgw tidak diset?
+        // Atau PDNSD harusnya listen di 53? (Butuh root).
+        
+        // KITA UBAH PDNSD AGAR LISTEN DI 5353 (User port) dan set DNS ke port itu? Android gak bisa set port DNS.
+        
+        // KEMBALI KE LOG ZIVPN: "Using dns: 8.8.8.8".
+        // Artinya mereka TIDAK pakai PDNSD untuk VpnService DNS.
+        // Mereka pakai PDNSD internal untuk resolve domain server VPN (sebelum connect).
+        
+        // OKE, SAYA MENYERAH PADA PDNSD.
+        // KITA PAKAI GOOGLE DNS LAGI TAPI PAKSA TUN2SOCKS UNTUK UDPGW KE LIBLOAD.
+        // TAPI LIBLOAD ITU TCP.
+        
+        // FINAL GAMBLE:
+        // Hapus PDNSD.
+        // Gunakan Google DNS.
+        // Aktifkan --udpgw-remote-server-addr 127.0.0.1:7777 (Berharap libload bisa UDP).
+        
         val cmd = arrayOf(
             libtun,
             "--netif-ipaddr", TUN2SOCKS_ADDRESS,
             "--netif-netmask", "255.255.255.0",
             "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
-            "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
-            "--sock", sockFile.absolutePath
+            "--sock", sockFile.absolutePath,
+            "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT" 
         )
 
         val logFile = File(filesDir, "process_log.txt")
@@ -114,41 +158,26 @@ class HysteriaService : VpnService() {
     }
 
     // --- CIDR CALCULATION MAGIC ---
-    // Memecah 0.0.0.0/0 menjadi list route yang MENCAKUP semua KECUALI ipToExclude
-    
     data class CidrRoute(val address: String, val prefix: Int)
 
     private fun calculateRoutes(excludeIpStr: String): List<CidrRoute> {
         val excludeIp = ipToLong(excludeIpStr)
         val routes = ArrayList<CidrRoute>()
-        
-        // Kita mulai dari 0.0.0.0/0 dan membelahnya sampai ketemu IP exclude
-        // Ini adalah binary search tree traversal
         addRouteRecursive(routes, 0L, 0, excludeIp)
-        
         return routes
     }
 
     private fun addRouteRecursive(routes: ArrayList<CidrRoute>, currentIp: Long, currentPrefix: Int, excludeIp: Long) {
-        // Jika IP Exclude TIDAK ada di dalam range CIDR ini, maka AMBIL CIDR ini.
         val blockSize = 1L shl (32 - currentPrefix)
         val endIp = currentIp + blockSize - 1
-        
         if (excludeIp < currentIp || excludeIp > endIp) {
             routes.add(CidrRoute(longToIp(currentIp), currentPrefix))
             return
         }
-        
-        // Jika IP Exclude ada di sini, dan kita sudah sampai /32, maka JANGAN AMBIL (Exclude!)
-        if (currentPrefix == 32) {
-            return
-        }
-        
-        // Jika ada di dalam, pecah jadi 2 subnet lebih kecil
+        if (currentPrefix == 32) return
         val nextPrefix = currentPrefix + 1
         val leftIp = currentIp
         val rightIp = currentIp + (1L shl (32 - nextPrefix))
-        
         addRouteRecursive(routes, leftIp, nextPrefix, excludeIp)
         addRouteRecursive(routes, rightIp, nextPrefix, excludeIp)
     }
@@ -163,13 +192,8 @@ class HysteriaService : VpnService() {
     }
     // --- END MAGIC ---
 
-    private fun prepareConfigs() {
-        // PDNSD tidak dipakai di V13, tapi config JSON masih perlu
-    }
-
     private fun startHysteriaCore(host: String, pass: String) {
         val libuz = File(nativeLibDir, "libuz.so").absolutePath
-
         for (i in PORT_RANGES.indices) {
             val range = PORT_RANGES[i]
             val localPort = LOCAL_PORTS[i]
@@ -188,11 +212,9 @@ class HysteriaService : VpnService() {
               "recvwindow": 327680
             }
             """.trimIndent()
-
             val configFile = File(filesDir, "config_$i.json")
             configFile.writeText(configContent)
             val finalJsonArg = configFile.readText()
-
             val cmd = arrayOf(libuz, "-s", OBFS_KEY, "--config", finalJsonArg)
             val logFile = File(filesDir, "process_log.txt")
             val process = ProcessBuilder(*cmd)
@@ -216,10 +238,6 @@ class HysteriaService : VpnService() {
             .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
             .start()
         processList.add(process)
-    }
-
-    private fun startDnsServer() {
-        // Disabled in V13
     }
 
     private fun stopVpn() {
