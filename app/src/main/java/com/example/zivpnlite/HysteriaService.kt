@@ -85,6 +85,8 @@ class HysteriaService : VpnService() {
               "server": "$host:$range",
               "obfs": "$OBFS_KEY",
               "auth": "$pass",
+              "up": "",
+              "down": "",
               "socks5": {
                 "listen": "127.0.0.1:$localPort"
               },
