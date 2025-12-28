@@ -62,27 +62,34 @@ class HysteriaService : VpnService() {
     private fun prepareConfigs() {
         val cacheDir = File(filesDir, "pdnsd_cache")
         if (!cacheDir.exists()) cacheDir.mkdirs()
+        
+        // Hapus cache lama agar tidak korup
+        File(cacheDir, "pdnsd.cache").delete()
 
         val confFile = File(filesDir, "pdnsd.conf")
-        if (!confFile.exists()) {
-            assets.open("pdnsd.conf").use { input ->
-                FileOutputStream(confFile).use { output ->
-                    input.copyTo(output)
-                }
+        // Selalu overwrite config untuk memastikan path benar
+        assets.open("pdnsd.conf").use { input ->
+            FileOutputStream(confFile).use { output ->
+                input.copyTo(output)
             }
-            val content = confFile.readText()
-            val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", cacheDir.absolutePath)
-            confFile.writeText(newContent)
         }
+        val content = confFile.readText()
+        // PENTING: Path harus absolute dan tanpa petik ganda yang salah
+        val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", cacheDir.absolutePath)
+        confFile.writeText(newContent)
     }
 
     private fun startDnsServer() {
         val libpdnsd = File(nativeLibDir, "libpdnsd.so").absolutePath
         val confFile = File(filesDir, "pdnsd.conf").absolutePath
-        // chmod config file to be sure
-        File(confFile).setReadable(true, false)
+        
+        // Pastikan executable
+        File(libpdnsd).setExecutable(true)
 
+        // Argumen pdnsd: -c config_file -d (daemon) atau -v9 (verbose)
+        // Kita pakai -v9 agar muncul di log
         val cmd = arrayOf(libpdnsd, "-v9", "-c", confFile)
+        
         val logFile = File(filesDir, "process_log.txt")
         val process = ProcessBuilder(*cmd)
             .directory(filesDir)
@@ -96,10 +103,11 @@ class HysteriaService : VpnService() {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
-        builder.addDnsServer(VPN_ADDRESS) // Point DNS to 169.254.1.1 (PDNSD)
+        // DNS diarahkan ke IP Tun (169.254.1.1)
+        // Tun2Socks akan menangkap ini via --dnsgw
+        builder.addDnsServer(VPN_ADDRESS) 
         builder.setMtu(1500)
 
-        // Exclude Server IP (Prevent Loop)
         val routes = calculateRoutes(serverIp)
         for (route in routes) {
             builder.addRoute(route.address, route.prefix)
@@ -113,29 +121,11 @@ class HysteriaService : VpnService() {
         val sockFile = File(filesDir, "tun.sock")
         if (sockFile.exists()) sockFile.delete()
 
-        // Tun2socks standard ZIVPN config (No UDPGW, No DNSGW args)
-        // PDNSD akan menghandle DNS request dari Android di 169.254.1.1:8091?
-        // Tunggu, Android kirim ke port 53. PDNSD listen di 8091.
-        // Siapa yang forward 53 -> 8091?
-        // Di config PDNSD ZIVPN tertulis: server_port = 8091.
-        // Jika tidak ada iptables, ini MISTERI.
-        // KECUALI... tun2socks punya built-in redirect jika --dnsgw tidak diset?
-        // Atau PDNSD harusnya listen di 53? (Butuh root).
-        
-        // KITA UBAH PDNSD AGAR LISTEN DI 5353 (User port) dan set DNS ke port itu? Android gak bisa set port DNS.
-        
-        // KEMBALI KE LOG ZIVPN: "Using dns: 8.8.8.8".
-        // Artinya mereka TIDAK pakai PDNSD untuk VpnService DNS.
-        // Mereka pakai PDNSD internal untuk resolve domain server VPN (sebelum connect).
-        
-        // OKE, SAYA MENYERAH PADA PDNSD.
-        // KITA PAKAI GOOGLE DNS LAGI TAPI PAKSA TUN2SOCKS UNTUK UDPGW KE LIBLOAD.
-        // TAPI LIBLOAD ITU TCP.
-        
-        // FINAL GAMBLE:
-        // Hapus PDNSD.
-        // Gunakan Google DNS.
-        // Aktifkan --udpgw-remote-server-addr 127.0.0.1:7777 (Berharap libload bisa UDP).
+        // UDPGW dimatikan (karena libload TCP only).
+        // DNSGW diaktifkan ke localhost:8091 (PDNSD).
+        // Kenapa localhost? Karena PDNSD bind ke 0.0.0.0 atau 127.0.0.1 biasanya.
+        // Di config asli: server_ip = 169.254.1.1.
+        // Mari kita ikuti config asli PDNSD.
         
         val cmd = arrayOf(
             libtun,
@@ -145,7 +135,7 @@ class HysteriaService : VpnService() {
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
             "--sock", sockFile.absolutePath,
-            "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT" 
+            "--dnsgw", "$VPN_ADDRESS:8091" // Sesuai config pdnsd asli
         )
 
         val logFile = File(filesDir, "process_log.txt")
