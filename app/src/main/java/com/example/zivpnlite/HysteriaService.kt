@@ -42,26 +42,9 @@ class HysteriaService : VpnService() {
                 
                 prepareConfigs()
                 startHysteriaCore(resolvedIP, pass)
-                startLoadBalancer()
-                startDnsServer() // PDNSD is BACK!
-                startTun2Socks(resolvedIP)
-            } catch (e: Exception) {
-                e.printStackTrace()
-                stopVpn()
-            }
-        }.start()
-
-        return START_STICKY
-    }
-
-    private fun cleanUpFiles() {
-        val filesToDelete = listOf("tun.sock", "process_log.txt", "pdnsd_cache/pdnsd.cache")
-        filesToDelete.forEach { File(filesDir, it).delete() }
-    }
-
-                prepareConfigs()
-                startHysteriaCore(resolvedIP, pass)
-                // startLoadBalancer() // BYPASS LOAD BALANCER (V17)
+                
+                // startLoadBalancer() // BYPASS LOAD BALANCER
+                
                 startDnsServer()
                 startTun2Socks(resolvedIP)
             } catch (e: Exception) {
@@ -81,19 +64,15 @@ class HysteriaService : VpnService() {
     private fun prepareConfigs() {
         val cacheDir = File(filesDir, "pdnsd_cache")
         if (!cacheDir.exists()) cacheDir.mkdirs()
-        
-        // Hapus cache lama agar tidak korup
         File(cacheDir, "pdnsd.cache").delete()
 
         val confFile = File(filesDir, "pdnsd.conf")
-        // Selalu overwrite config untuk memastikan path benar
         assets.open("pdnsd.conf").use { input ->
             FileOutputStream(confFile).use { output ->
                 input.copyTo(output)
             }
         }
         val content = confFile.readText()
-        // PENTING: Path harus absolute dan tanpa petik ganda yang salah
         val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", cacheDir.absolutePath)
         confFile.writeText(newContent)
     }
@@ -101,14 +80,9 @@ class HysteriaService : VpnService() {
     private fun startDnsServer() {
         val libpdnsd = File(nativeLibDir, "libpdnsd.so").absolutePath
         val confFile = File(filesDir, "pdnsd.conf").absolutePath
-        
-        // Pastikan executable
         File(libpdnsd).setExecutable(true)
 
-        // Argumen pdnsd: -c config_file -d (daemon) atau -v9 (verbose)
-        // Kita pakai -v9 agar muncul di log
         val cmd = arrayOf(libpdnsd, "-v9", "-c", confFile)
-        
         val logFile = File(filesDir, "process_log.txt")
         val process = ProcessBuilder(*cmd)
             .directory(filesDir)
@@ -122,9 +96,7 @@ class HysteriaService : VpnService() {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
-        // DNS diarahkan ke IP Tun (169.254.1.1)
-        // Tun2Socks akan menangkap ini via --dnsgw
-        builder.addDnsServer(VPN_ADDRESS) 
+        builder.addDnsServer(VPN_ADDRESS)
         builder.setMtu(1500)
 
         val routes = calculateRoutes(serverIp)
@@ -140,18 +112,17 @@ class HysteriaService : VpnService() {
         val sockFile = File(filesDir, "tun.sock")
         if (sockFile.exists()) sockFile.delete()
 
-        // DIRECT MODE (V17): Point to Hysteria Port (1080)
-        
+        // DIRECT MODE TO HYSTERIA PORT 1080
         val cmd = arrayOf(
             libtun,
             "--netif-ipaddr", TUN2SOCKS_ADDRESS,
             "--netif-netmask", "255.255.255.0",
-            "--socks-server-addr", "127.0.0.1:1080", // DIRECT
+            "--socks-server-addr", "127.0.0.1:1080", // Direct to Hysteria
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
             "--sock", sockFile.absolutePath,
             "--dnsgw", "$VPN_ADDRESS:8091",
-            "--udpgw-remote-server-addr", "127.0.0.1:1080" // DIRECT UDPGW
+            "--udpgw-remote-server-addr", "127.0.0.1:1080" // Try UDPGW to Hysteria directly
         )
 
         val logFile = File(filesDir, "process_log.txt")
@@ -200,37 +171,41 @@ class HysteriaService : VpnService() {
 
     private fun startHysteriaCore(host: String, pass: String) {
         val libuz = File(nativeLibDir, "libuz.so").absolutePath
-        for (i in PORT_RANGES.indices) {
-            val range = PORT_RANGES[i]
-            val localPort = LOCAL_PORTS[i]
-            val configContent = """
-            {
-              "server": "$host:$range",
-              "obfs": "$OBFS_KEY",
-              "auth": "$pass",
-              "up": "",
-              "down": "",
-              "socks5": {
-                "listen": "127.0.0.1:$localPort"
-              },
-              "insecure": true,
-              "recvwindowconn": 131072,
-              "recvwindow": 327680
-            }
-            """.trimIndent()
-            val configFile = File(filesDir, "config_$i.json")
-            configFile.writeText(configContent)
-            val finalJsonArg = configFile.readText()
-            val cmd = arrayOf(libuz, "-s", OBFS_KEY, "--config", finalJsonArg)
-            val logFile = File(filesDir, "process_log.txt")
-            val process = ProcessBuilder(*cmd)
-                .directory(filesDir)
-                .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-                .start()
-            processList.add(process)
+        // Only start the first instance (Port 1080) for Direct Mode
+        val range = PORT_RANGES[0]
+        val localPort = LOCAL_PORTS[0]
+        
+        val configContent = """
+        {
+          "server": "$host:$range",
+          "obfs": "$OBFS_KEY",
+          "auth": "$pass",
+          "up": "",
+          "down": "",
+          "socks5": {
+            "listen": "127.0.0.1:$localPort"
+          },
+          "insecure": true,
+          "recvwindowconn": 131072,
+          "recvwindow": 327680
         }
+        """.trimIndent()
+
+        val configFile = File(filesDir, "config_0.json")
+        configFile.writeText(configContent)
+        val finalJsonArg = configFile.readText()
+
+        val cmd = arrayOf(libuz, "-s", OBFS_KEY, "--config", finalJsonArg)
+        val logFile = File(filesDir, "process_log.txt")
+        val process = ProcessBuilder(*cmd)
+            .directory(filesDir)
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+            .start()
+        processList.add(process)
     }
+
+    // startLoadBalancer is unused in this version
 
     private fun startLoadBalancer() {
         val libload = File(nativeLibDir, "libload.so").absolutePath
