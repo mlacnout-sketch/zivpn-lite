@@ -163,7 +163,8 @@ class HysteriaService : VpnService() {
             "--netif-netmask", "255.255.255.0",
             "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
             "--tunmtu", "1500",
-            "--tunfd", tunFd.toString()
+            "--tunfd", tunFd.toString(),
+            "--sock", File(filesDir, "tun.sock").absolutePath
         )
 
         val logFile = File(filesDir, "process_log.txt")
