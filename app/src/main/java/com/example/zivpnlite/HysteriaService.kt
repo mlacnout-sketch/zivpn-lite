@@ -36,14 +36,13 @@ class HysteriaService : VpnService() {
 
         Thread {
             try {
-                // 1. Resolve Host ke IP dulu agar libuz tidak perlu DNS Lookup
-                //    dan agar kita tahu target IP untuk routing exclusion (jika perlu nanti)
+                // Bersihkan file sisa sebelum mulai
+                cleanUpFiles()
+
                 val resolvedIP = InetAddress.getByName(host).hostAddress
                 
                 prepareConfigs()
-                // Gunakan IP yang sudah di-resolve untuk config Hysteria
-                startHysteriaCore(resolvedIP, pass) 
-                
+                startHysteriaCore(resolvedIP, pass)
                 startLoadBalancer()
                 startDnsServer()
                 startTun2Socks()
@@ -56,16 +55,21 @@ class HysteriaService : VpnService() {
         return START_STICKY
     }
 
+    private fun cleanUpFiles() {
+        val filesToDelete = listOf("tun.sock", "process_log.txt")
+        filesToDelete.forEach { 
+            File(filesDir, it).delete() 
+        }
+    }
+
     private fun startTun2Socks() {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
-        builder.addDnsServer("8.8.8.8") // Gunakan Google DNS langsung di VPN
+        // KEMBALI KE DNS INTERNAL (Seperti Aslinya)
+        builder.addDnsServer(VPN_ADDRESS) 
         builder.setMtu(1500)
 
-        // BYPASS VPN LOOP:
-        // Exclude aplikasi ini sendiri agar traffic libuz (UDP ke Server)
-        // lewat jalur internet asli, bukan masuk tunnel.
         try {
             builder.addDisallowedApplication(packageName)
         } catch (e: Exception) {
@@ -78,6 +82,10 @@ class HysteriaService : VpnService() {
         val tunFd = vpnInterface!!.fd
 
         val libtun = File(nativeLibDir, "libtun2socks.so").absolutePath
+        val sockFile = File(filesDir, "tun.sock")
+
+        // Pastikan sock file tidak ada sebelum start
+        if (sockFile.exists()) sockFile.delete()
 
         val cmd = arrayOf(
             libtun,
@@ -86,7 +94,8 @@ class HysteriaService : VpnService() {
             "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
-            "--sock", File(filesDir, "tun.sock").absolutePath
+            "--sock", sockFile.absolutePath,
+            "--dnsgw", "$VPN_ADDRESS:8091" // Tambahkan DNS Gateway eksplisit ke pdnsd
         )
 
         val logFile = File(filesDir, "process_log.txt")
@@ -119,7 +128,6 @@ class HysteriaService : VpnService() {
             val range = PORT_RANGES[i]
             val localPort = LOCAL_PORTS[i]
             
-            // Config menggunakan IP (hasil resolve) bukan Domain
             val configContent = """
             {
               "server": "$host:$range",
@@ -175,8 +183,12 @@ class HysteriaService : VpnService() {
         val libpdnsd = File(nativeLibDir, "libpdnsd.so").absolutePath
         val confFile = File(filesDir, "pdnsd.conf").absolutePath
         val cmd = arrayOf(libpdnsd, "-v9", "-c", confFile)
+        
+        val logFile = File(filesDir, "process_log.txt")
         val process = ProcessBuilder(*cmd)
             .directory(filesDir)
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
             .start()
         processList.add(process)
     }
