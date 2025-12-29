@@ -6,7 +6,6 @@ import android.net.LocalSocketAddress
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import java.io.File
-import java.io.FileDescriptor
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.InetAddress
@@ -40,27 +39,24 @@ class HysteriaService : VpnService() {
 
         Thread {
             try {
-                // Kill all zombies aggressively
+                // Kill all zombies aggressively (ZIVPN Clean Up Logic)
                 Runtime.getRuntime().exec("pkill -f libuz").waitFor()
                 Runtime.getRuntime().exec("pkill -f libload").waitFor()
                 Runtime.getRuntime().exec("pkill -f libpdnsd").waitFor()
                 Runtime.getRuntime().exec("pkill -f libtun2socks").waitFor()
 
                 cleanUpFiles()
+                
+                // Resolve IP (Logic dari p.java ZIVPN)
                 val resolvedIP = InetAddress.getByName(host).hostAddress
                 
-                prepareConfigs()
-                
-                // 1. Start Hysteria Core (4 Instances)
+                // 1. Start Hysteria Core (p.java logic)
                 startHysteriaCore(resolvedIP, pass)
                 
-                // 2. Start Load Balancer (Aggregation)
+                // 2. Start Load Balancer (b.java logic)
                 startLoadBalancer()
                 
-                // 3. Start DNS (PDNSD) - Optional but good for local resolving
-                // startDnsServer() // Disable dulu, pakai Google DNS di VPN
-                
-                // 4. Start Tun2Socks + FD Injection
+                // 3. Start Tun2Socks (f.java logic)
                 startTun2Socks(resolvedIP)
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -72,26 +68,27 @@ class HysteriaService : VpnService() {
     }
 
     private fun cleanUpFiles() {
-        val filesToDelete = listOf("tun.sock", "process_log.txt", "pdnsd_cache/pdnsd.cache")
+        // Hapus file sisa, tapi jangan hapus tun.sock nanti (akan di-create ulang)
+        val filesToDelete = listOf("process_log.txt", "tun.sock")
         filesToDelete.forEach { File(filesDir, it).delete() }
-    }
-
-    private fun prepareConfigs() {
-        // ... (PDNSD config logic if needed)
     }
 
     private fun startTun2Socks(serverIp: String) {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
+        
+        // DNS Logic: ZIVPN Asli menggunakan Google DNS di Java layer
         builder.addDnsServer("8.8.8.8")
         builder.addDnsServer("8.8.4.4")
         builder.setMtu(1500)
 
+        // Routing Logic: Exclude Server IP (r3/k.java logic)
         val routes = calculateRoutes(serverIp)
         for (route in routes) {
             builder.addRoute(route.address, route.prefix)
         }
+        // Tambahan khusus: Route IP Tun2Socks ke Interface (sesuai log ZIVPN)
         builder.addRoute(TUN2SOCKS_ADDRESS, 32)
 
         vpnInterface = builder.establish() ?: throw IOException("Failed to establish VPN")
@@ -100,12 +97,12 @@ class HysteriaService : VpnService() {
         val libtun = File(nativeLibDir, "libtun2socks.so").absolutePath
         val sockFile = File(filesDir, "tun.sock")
         
-        // LOGIC ASLI ZIVPN: Create file, jangan delete!
+        // ZIVPN Logic (f.java): Create new file if not exists
         if (!sockFile.exists()) {
             sockFile.createNewFile()
         }
 
-        // LOGIC ASLI ZIVPN: Gunakan StringBuilder dan Runtime.exec (String)
+        // ZIVPN Logic: Construct command string manually
         val sb = StringBuilder()
         sb.append(libtun)
         sb.append(" --netif-ipaddr $TUN2SOCKS_ADDRESS")
@@ -115,49 +112,38 @@ class HysteriaService : VpnService() {
         sb.append(" --tunfd $tunFd")
         sb.append(" --sock ${sockFile.absolutePath}")
         sb.append(" --loglevel 3")
-        
-        // Tambahan kita: UDPGW (ZIVPN pakai logic if k, kita paksa aktif)
+        // UDPGW Logic: Always Enable for Full VPN
         sb.append(" --udpgw-transparent-dns")
         sb.append(" --udpgw-remote-server-addr 127.0.0.1:$LOAD_BALANCER_PORT")
 
         val logFile = File(filesDir, "process_log.txt")
         
-        // Exec String Command
+        // ZIVPN Logic: Use Runtime.exec(String)
         val process = Runtime.getRuntime().exec(sb.toString())
         
-        // Manual Stream Redirection (Karena Runtime.exec tidak punya redirectOutput mudah)
-        // Kita buat thread terpisah untuk baca stdout/stderr ke file log
-        Thread {
-            process.inputStream.copyTo(FileOutputStream(logFile, true))
-        }.start()
-        Thread {
-            process.errorStream.copyTo(FileOutputStream(logFile, true))
-        }.start()
+        // Redirect Output (Manual Threading)
+        Thread { process.inputStream.copyTo(FileOutputStream(logFile, true)) }.start()
+        Thread { process.errorStream.copyTo(FileOutputStream(logFile, true)) }.start()
 
         processList.add(process)
 
-        // FD INJECTION
+        // ZIVPN Logic: FD Injection (b() function)
         if (!sendFdToSocket(vpnInterface!!, sockFile)) {
             throw IOException("Failed to send FD to tun2socks socket!")
         }
     }
 
-    // Fungsi sakti dari r3.f.java
+    // Logic: r3.f.java b()
     private fun sendFdToSocket(vpnInterface: ParcelFileDescriptor, socketFile: File): Boolean {
-        for (i in 0..10) { // Retry 10x (5 detik)
+        for (i in 0..10) { 
             try {
                 val localSocket = LocalSocket()
                 localSocket.connect(LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
-                
-                // Kirim File Descriptor
                 localSocket.setFileDescriptorsForSend(arrayOf(vpnInterface.fileDescriptor))
-                
-                // Kirim Magic Byte 42
                 localSocket.outputStream.write(42)
-                
                 localSocket.shutdownOutput()
                 localSocket.close()
-                return true // Sukses
+                return true
             } catch (e: Exception) {
                 try { Thread.sleep(500) } catch (inter: InterruptedException) {}
             }
@@ -165,7 +151,7 @@ class HysteriaService : VpnService() {
         return false
     }
 
-    // --- CIDR CALCULATION ---
+    // Logic: r3.c.java (NetworkSpace) -> Simplified Recursion
     data class CidrRoute(val address: String, val prefix: Int)
 
     private fun calculateRoutes(excludeIpStr: String): List<CidrRoute> {
@@ -198,17 +184,19 @@ class HysteriaService : VpnService() {
     private fun longToIp(ip: Long): String {
         return "${(ip shr 24) and 0xFF}.${(ip shr 16) and 0xFF}.${(ip shr 8) and 0xFF}.${ip and 0xFF}"
     }
-    // --- END MAGIC ---
 
-    private fun startHysteriaCore(host: String, pass: String) {
+    // Logic: com.zi.zivpo.p.java
+    private fun startHysteriaCore(serverIp: String, pass: String) {
         val libuz = File(nativeLibDir, "libuz.so").absolutePath
 
         for (i in PORT_RANGES.indices) {
             val range = PORT_RANGES[i]
             val localPort = LOCAL_PORTS[i]
+            
+            // Config String JSON (bukan File)
             val configContent = """
             {
-              "server": "$host:$range",
+              "server": "$serverIp:$range",
               "obfs": "$OBFS_KEY",
               "auth": "$pass",
               "up": "",
@@ -222,11 +210,14 @@ class HysteriaService : VpnService() {
             }
             """.trimIndent()
 
-            val configFile = File(filesDir, "config_$i.json")
-            configFile.writeText(configContent)
-            val finalJsonArg = configFile.readText()
-
-            val cmd = arrayOf(libuz, "-s", OBFS_KEY, "--config", finalJsonArg)
+            // ZIVPN: ProcessBuilder(cmdArray)
+            // Hysteria tidak rewel argumen, pakai ProcessBuilder aman.
+            val cmd = arrayOf(
+                libuz,
+                "-s", OBFS_KEY,
+                "--config", configContent
+            )
+            
             val logFile = File(filesDir, "process_log.txt")
             val process = ProcessBuilder(*cmd)
                 .directory(filesDir)
@@ -237,18 +228,26 @@ class HysteriaService : VpnService() {
         }
     }
 
+    // Logic: r3.b.java
     private fun startLoadBalancer() {
         val libload = File(nativeLibDir, "libload.so").absolutePath
-        val tunnelArgs = LOCAL_PORTS.map { "127.0.0.1:$it" }
-        val cmd = mutableListOf(libload, "-lport", LOAD_BALANCER_PORT.toString(), "-tunnel")
-        cmd.addAll(tunnelArgs)
-
         val logFile = File(filesDir, "process_log.txt")
-        val process = ProcessBuilder(cmd)
-            .directory(filesDir)
-            .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-            .start()
+
+        // ZIVPN Logic: Runtime.exec(String) for libload too!
+        // r3.b.java: sb.append(" -tunnel " + str4 + " " + str3...)
+        val sb = StringBuilder()
+        sb.append(libload)
+        sb.append(" -lport $LOAD_BALANCER_PORT")
+        sb.append(" -tunnel")
+        for (port in LOCAL_PORTS) {
+            sb.append(" 127.0.0.1:$port")
+        }
+
+        val process = Runtime.getRuntime().exec(sb.toString())
+        
+        Thread { process.inputStream.copyTo(FileOutputStream(logFile, true)) }.start()
+        Thread { process.errorStream.copyTo(FileOutputStream(logFile, true)) }.start()
+
         processList.add(process)
     }
 
