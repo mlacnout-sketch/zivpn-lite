@@ -1,9 +1,12 @@
 package com.example.zivpnlite
 
 import android.content.Intent
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import java.io.File
+import java.io.FileDescriptor
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.InetAddress
@@ -37,15 +40,27 @@ class HysteriaService : VpnService() {
 
         Thread {
             try {
+                // Kill all zombies aggressively
+                Runtime.getRuntime().exec("pkill -f libuz").waitFor()
+                Runtime.getRuntime().exec("pkill -f libload").waitFor()
+                Runtime.getRuntime().exec("pkill -f libpdnsd").waitFor()
+                Runtime.getRuntime().exec("pkill -f libtun2socks").waitFor()
+
                 cleanUpFiles()
                 val resolvedIP = InetAddress.getByName(host).hostAddress
                 
                 prepareConfigs()
+                
+                // 1. Start Hysteria Core (4 Instances)
                 startHysteriaCore(resolvedIP, pass)
                 
-                // startLoadBalancer() // BYPASS LOAD BALANCER
+                // 2. Start Load Balancer (Aggregation)
+                startLoadBalancer()
                 
-                startDnsServer()
+                // 3. Start DNS (PDNSD) - Optional but good for local resolving
+                // startDnsServer() // Disable dulu, pakai Google DNS di VPN
+                
+                // 4. Start Tun2Socks + FD Injection
                 startTun2Socks(resolvedIP)
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -62,43 +77,18 @@ class HysteriaService : VpnService() {
     }
 
     private fun prepareConfigs() {
-        val cacheDir = File(filesDir, "pdnsd_cache")
-        if (!cacheDir.exists()) cacheDir.mkdirs()
-        File(cacheDir, "pdnsd.cache").delete()
-
-        val confFile = File(filesDir, "pdnsd.conf")
-        assets.open("pdnsd.conf").use { input ->
-            FileOutputStream(confFile).use { output ->
-                input.copyTo(output)
-            }
-        }
-        val content = confFile.readText()
-        val newContent = content.replace("/data/user/0/com.example.zivpnlite/files", cacheDir.absolutePath)
-        confFile.writeText(newContent)
-    }
-
-    private fun startDnsServer() {
-        val libpdnsd = File(nativeLibDir, "libpdnsd.so").absolutePath
-        val confFile = File(filesDir, "pdnsd.conf").absolutePath
-        File(libpdnsd).setExecutable(true)
-
-        val cmd = arrayOf(libpdnsd, "-v9", "-c", confFile)
-        val logFile = File(filesDir, "process_log.txt")
-        val process = ProcessBuilder(*cmd)
-            .directory(filesDir)
-            .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-            .start()
-        processList.add(process)
+        // ... (PDNSD config logic if needed)
     }
 
     private fun startTun2Socks(serverIp: String) {
         val builder = Builder()
         builder.setSession("ZIVPN Lite")
         builder.addAddress(VPN_ADDRESS, 24)
-        builder.addDnsServer(VPN_ADDRESS)
+        builder.addDnsServer("8.8.8.8")
+        builder.addDnsServer("8.8.4.4")
         builder.setMtu(1500)
 
+        // Routing: Exclude Server IP & Local Network
         val routes = calculateRoutes(serverIp)
         for (route in routes) {
             builder.addRoute(route.address, route.prefix)
@@ -112,17 +102,17 @@ class HysteriaService : VpnService() {
         val sockFile = File(filesDir, "tun.sock")
         if (sockFile.exists()) sockFile.delete()
 
-        // DIRECT MODE TO HYSTERIA PORT 1080
+        // Argumen Tun2Socks (Sesuai JADX r3/f.java)
         val cmd = arrayOf(
             libtun,
             "--netif-ipaddr", TUN2SOCKS_ADDRESS,
             "--netif-netmask", "255.255.255.0",
-            "--socks-server-addr", "127.0.0.1:1080", // Direct to Hysteria
+            "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
             "--tunmtu", "1500",
             "--tunfd", tunFd.toString(),
             "--sock", sockFile.absolutePath,
-            "--dnsgw", "$VPN_ADDRESS:8091",
-            "--udpgw-remote-server-addr", "127.0.0.1:1080" // Try UDPGW to Hysteria directly
+            "--loglevel", "3",
+            "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT" // UDP via LoadBalancer
         )
 
         val logFile = File(filesDir, "process_log.txt")
@@ -132,9 +122,37 @@ class HysteriaService : VpnService() {
             .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
             .start()
         processList.add(process)
+
+        // *** THE HOLY GRAIL: FD INJECTION ***
+        if (!sendFdToSocket(vpnInterface!!, sockFile)) {
+            throw IOException("Failed to send FD to tun2socks socket!")
+        }
     }
 
-    // --- CIDR CALCULATION MAGIC ---
+    // Fungsi sakti dari r3.f.java
+    private fun sendFdToSocket(vpnInterface: ParcelFileDescriptor, socketFile: File): Boolean {
+        for (i in 0..10) { // Retry 10x (5 detik)
+            try {
+                val localSocket = LocalSocket()
+                localSocket.connect(LocalSocketAddress(socketFile.absolutePath, LocalSocketAddress.Namespace.FILESYSTEM))
+                
+                // Kirim File Descriptor
+                localSocket.setFileDescriptorsForSend(arrayOf(vpnInterface.fileDescriptor))
+                
+                // Kirim Magic Byte 42
+                localSocket.outputStream.write(42)
+                
+                localSocket.shutdownOutput()
+                localSocket.close()
+                return true // Sukses
+            } catch (e: Exception) {
+                try { Thread.sleep(500) } catch (inter: InterruptedException) {}
+            }
+        }
+        return false
+    }
+
+    // --- CIDR CALCULATION ---
     data class CidrRoute(val address: String, val prefix: Int)
 
     private fun calculateRoutes(excludeIpStr: String): List<CidrRoute> {
@@ -171,47 +189,47 @@ class HysteriaService : VpnService() {
 
     private fun startHysteriaCore(host: String, pass: String) {
         val libuz = File(nativeLibDir, "libuz.so").absolutePath
-        // Only start the first instance (Port 1080) for Direct Mode
-        val range = PORT_RANGES[0]
-        val localPort = LOCAL_PORTS[0]
-        
-        val configContent = """
-        {
-          "server": "$host:$range",
-          "obfs": "$OBFS_KEY",
-          "auth": "$pass",
-          "up": "",
-          "down": "",
-          "socks5": {
-            "listen": "127.0.0.1:$localPort"
-          },
-          "insecure": true,
-          "recvwindowconn": 131072,
-          "recvwindow": 327680
+
+        for (i in PORT_RANGES.indices) {
+            val range = PORT_RANGES[i]
+            val localPort = LOCAL_PORTS[i]
+            val configContent = """
+            {
+              "server": "$host:$range",
+              "obfs": "$OBFS_KEY",
+              "auth": "$pass",
+              "up": "",
+              "down": "",
+              "socks5": {
+                "listen": "127.0.0.1:$localPort"
+              },
+              "insecure": true,
+              "recvwindowconn": 131072,
+              "recvwindow": 327680
+            }
+            """.trimIndent()
+
+            val configFile = File(filesDir, "config_$i.json")
+            configFile.writeText(configContent)
+            val finalJsonArg = configFile.readText()
+
+            val cmd = arrayOf(libuz, "-s", OBFS_KEY, "--config", finalJsonArg)
+            val logFile = File(filesDir, "process_log.txt")
+            val process = ProcessBuilder(*cmd)
+                .directory(filesDir)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
+                .start()
+            processList.add(process)
         }
-        """.trimIndent()
-
-        val configFile = File(filesDir, "config_0.json")
-        configFile.writeText(configContent)
-        val finalJsonArg = configFile.readText()
-
-        val cmd = arrayOf(libuz, "-s", OBFS_KEY, "--config", finalJsonArg)
-        val logFile = File(filesDir, "process_log.txt")
-        val process = ProcessBuilder(*cmd)
-            .directory(filesDir)
-            .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-            .start()
-        processList.add(process)
     }
-
-    // startLoadBalancer is unused in this version
 
     private fun startLoadBalancer() {
         val libload = File(nativeLibDir, "libload.so").absolutePath
         val tunnelArgs = LOCAL_PORTS.map { "127.0.0.1:$it" }
         val cmd = mutableListOf(libload, "-lport", LOAD_BALANCER_PORT.toString(), "-tunnel")
         cmd.addAll(tunnelArgs)
+
         val logFile = File(filesDir, "process_log.txt")
         val process = ProcessBuilder(cmd)
             .directory(filesDir)
