@@ -88,7 +88,6 @@ class HysteriaService : VpnService() {
         builder.addDnsServer("8.8.4.4")
         builder.setMtu(1500)
 
-        // Routing: Exclude Server IP & Local Network
         val routes = calculateRoutes(serverIp)
         for (route in routes) {
             builder.addRoute(route.address, route.prefix)
@@ -100,31 +99,44 @@ class HysteriaService : VpnService() {
 
         val libtun = File(nativeLibDir, "libtun2socks.so").absolutePath
         val sockFile = File(filesDir, "tun.sock")
-        if (sockFile.exists()) sockFile.delete()
+        
+        // LOGIC ASLI ZIVPN: Create file, jangan delete!
+        if (!sockFile.exists()) {
+            sockFile.createNewFile()
+        }
 
-        // Argumen Tun2Socks (Sesuai JADX r3/f.java)
-        val cmd = arrayOf(
-            libtun,
-            "--netif-ipaddr", TUN2SOCKS_ADDRESS,
-            "--netif-netmask", "255.255.255.0",
-            "--socks-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT",
-            "--tunmtu", "1500",
-            "--tunfd", tunFd.toString(),
-            "--sock", sockFile.absolutePath,
-            "--loglevel", "3",
-            "--udpgw-transparent-dns", // Transparent DNS!
-            "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT" // UDP via LoadBalancer
-        )
+        // LOGIC ASLI ZIVPN: Gunakan StringBuilder dan Runtime.exec (String)
+        val sb = StringBuilder()
+        sb.append(libtun)
+        sb.append(" --netif-ipaddr $TUN2SOCKS_ADDRESS")
+        sb.append(" --netif-netmask 255.255.255.0")
+        sb.append(" --socks-server-addr 127.0.0.1:$LOAD_BALANCER_PORT")
+        sb.append(" --tunmtu 1500")
+        sb.append(" --tunfd $tunFd")
+        sb.append(" --sock ${sockFile.absolutePath}")
+        sb.append(" --loglevel 3")
+        
+        // Tambahan kita: UDPGW (ZIVPN pakai logic if k, kita paksa aktif)
+        sb.append(" --udpgw-transparent-dns")
+        sb.append(" --udpgw-remote-server-addr 127.0.0.1:$LOAD_BALANCER_PORT")
 
         val logFile = File(filesDir, "process_log.txt")
-        val process = ProcessBuilder(*cmd)
-            .directory(filesDir)
-            .redirectErrorStream(true)
-            .redirectOutput(ProcessBuilder.Redirect.appendTo(logFile))
-            .start()
+        
+        // Exec String Command
+        val process = Runtime.getRuntime().exec(sb.toString())
+        
+        // Manual Stream Redirection (Karena Runtime.exec tidak punya redirectOutput mudah)
+        // Kita buat thread terpisah untuk baca stdout/stderr ke file log
+        Thread {
+            process.inputStream.copyTo(FileOutputStream(logFile, true))
+        }.start()
+        Thread {
+            process.errorStream.copyTo(FileOutputStream(logFile, true))
+        }.start()
+
         processList.add(process)
 
-        // *** THE HOLY GRAIL: FD INJECTION ***
+        // FD INJECTION
         if (!sendFdToSocket(vpnInterface!!, sockFile)) {
             throw IOException("Failed to send FD to tun2socks socket!")
         }
