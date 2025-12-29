@@ -112,6 +112,7 @@ class HysteriaService : VpnService() {
             "--tunfd", tunFd.toString(),
             "--sock", sockFile.absolutePath,
             "--loglevel", "3",
+            "--udpgw-transparent-dns", // Transparent DNS!
             "--udpgw-remote-server-addr", "127.0.0.1:$LOAD_BALANCER_PORT" // UDP via LoadBalancer
         )
 
