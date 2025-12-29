@@ -95,12 +95,12 @@ class HysteriaService : VpnService() {
         val tunFd = vpnInterface!!.fd
 
         val libtun = File(nativeLibDir, "libtun2socks.so").absolutePath
-        val sockFile = File(filesDir, "tun.sock")
+        // Gunakan CACHE DIR untuk socket (lebih aman dari permission issue)
+        val sockFile = File(cacheDir, "tun.sock")
         
-        // ZIVPN Logic (f.java): Create new file if not exists
-        if (!sockFile.exists()) {
-            sockFile.createNewFile()
-        }
+        // Pastikan bersih dan buat baru
+        if (sockFile.exists()) sockFile.delete()
+        sockFile.createNewFile()
 
         // ZIVPN Logic: Construct command string manually
         val sb = StringBuilder()
@@ -121,13 +121,16 @@ class HysteriaService : VpnService() {
         // ZIVPN Logic: Use Runtime.exec(String)
         val process = Runtime.getRuntime().exec(sb.toString())
         
-        // Redirect Output (Manual Threading)
+        // Redirect Output
         Thread { process.inputStream.copyTo(FileOutputStream(logFile, true)) }.start()
         Thread { process.errorStream.copyTo(FileOutputStream(logFile, true)) }.start()
 
         processList.add(process)
 
-        // ZIVPN Logic: FD Injection (b() function)
+        // Beri waktu binary untuk inisialisasi socket listener
+        try { Thread.sleep(200) } catch (e: InterruptedException) {}
+
+        // ZIVPN Logic: FD Injection
         if (!sendFdToSocket(vpnInterface!!, sockFile)) {
             throw IOException("Failed to send FD to tun2socks socket!")
         }
